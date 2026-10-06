@@ -1,18 +1,91 @@
+import { page } from './page.js';
+
+export const TARGETS = Object.freeze({
+  calories: [2300, 2500], protein: [120, 140], fat: [55, 70], carbs: [290, 340],
+});
+
+// Dates in D1 are YYYY-MM-DD in Japan time. Never use the visitor's timezone.
+export function period(searchParams, now = new Date()) {
+  const range = searchParams.get('range') || 'all';
+  if (!['7', '30', 'all'].includes(range)) {
+    throw new RangeError('range は 7 / 30 / all を指定してください。');
+  }
+  const end = new Date(now.getTime() + 9 * 3600000).toISOString().slice(0, 10);
+  const start = range === 'all' ? null : new Date(Date.parse(end + 'T00:00:00Z') - (Number(range) - 1) * 86400000).toISOString().slice(0, 10);
+  return { range, start, end, timezone: 'Asia/Tokyo' };
+}
+
+function filtered(db, sql, p) {
+  const where = p.start ? ' WHERE date >= ? AND date <= ?' : '';
+  const stmt = db.prepare(sql.replace('/*period*/', where));
+  return p.start ? stmt.bind(p.start, p.end) : stmt;
+}
+
+const DAILY = 'SELECT * FROM daily /*period*/ ORDER BY date';
+const MEALS = 'SELECT date, meal_group, SUM(calories) calories FROM meals /*period*/ GROUP BY date, meal_group ORDER BY date, meal_group';
+const VOLUMES = 'SELECT date, SUM(weight_kg * reps) volume FROM workout_sets /*period*/ GROUP BY date ORDER BY date';
+const EXERCISES = 'SELECT exercise, COUNT(*) sets, MAX(date) last_date FROM workout_sets GROUP BY exercise ORDER BY exercise';
+
+function json(value, status = 200) {
+  return Response.json(value, { status, headers: { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
+}
+
 export default {
   async fetch(request, env) {
-    const u = new URL(request.url);
-    if (u.pathname === "/api/daily") {
-      const { results } = await env.DB.prepare("SELECT * FROM daily ORDER BY date").all();
-      return Response.json(results);
+    const url = new URL(request.url);
+    if (!['GET', 'HEAD'].includes(request.method)) {
+      return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, HEAD' } });
     }
-    if (u.pathname === "/api/meals") {
-      const { results } = await env.DB.prepare("SELECT date, meal_group, SUM(calories) calories FROM meals GROUP BY date, meal_group ORDER BY date").all();
-      return Response.json(results);
+    if (url.pathname === '/' || url.pathname === '/index.html') {
+      return new Response(request.method === 'HEAD' ? null : page, { headers: {
+        'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache',
+        'x-content-type-options': 'nosniff', 'referrer-policy': 'same-origin',
+        'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'",
+      } });
     }
-    return new Response(page, { headers: { "content-type": "text/html; charset=utf-8" } });
-  }
+    if (url.pathname === '/favicon.ico') return new Response(null, { status: 204 });
+    if (!['/api/daily', '/api/meals', '/api/dashboard', '/api/exercises', '/api/exercise'].includes(url.pathname)) {
+      return json({ error: 'Not found' }, 404);
+    }
+    try {
+      const p = period(url.searchParams);
+      let data;
+      switch (url.pathname) {
+        case '/api/daily':
+          data = (await filtered(env.DB, DAILY, p).all()).results;
+          break;
+        case '/api/meals':
+          data = (await filtered(env.DB, MEALS, p).all()).results;
+          break;
+        case '/api/exercises':
+          data = (await env.DB.prepare(EXERCISES).all()).results;
+          break;
+        case '/api/exercise': {
+          const name = url.searchParams.get('name');
+          if (!name || name.length > 200) return json({ error: 'name に種目名を指定してください（200文字以内）。' }, 400);
+          const dateFilter = p.start ? ' AND date >= ? AND date <= ?' : '';
+          // One row is one set: daily max weight, total repetitions and volume.
+          const sql = 'SELECT date, MAX(weight_kg) weight_kg, SUM(reps) reps, SUM(weight_kg * reps) volume, COUNT(*) sets FROM workout_sets WHERE exercise = ?' + dateFilter + ' GROUP BY date ORDER BY date';
+          const rows = await env.DB.prepare(sql).bind(name, ...(p.start ? [p.start, p.end] : [])).all();
+          data = { period: p, exercise: name, days: rows.results };
+          break;
+        }
+        case '/api/dashboard': {
+          const [daily, meals, volumes, exercises] = await env.DB.batch([
+            filtered(env.DB, DAILY, p), filtered(env.DB, MEALS, p),
+            filtered(env.DB, VOLUMES, p), env.DB.prepare(EXERCISES),
+          ]);
+          data = { period: p, targets: TARGETS, daily: daily.results, meals: meals.results,
+            workout_days: volumes.results, exercises: exercises.results };
+          break;
+        }
+      }
+      const response = json(data);
+      return request.method === 'HEAD' ? new Response(null, response) : response;
+    } catch (error) {
+      if (error instanceof RangeError) return json({ error: error.message }, 400);
+      console.error(JSON.stringify({ event: 'dashboard_query_failed', path: url.pathname, error: error.name }));
+      return json({ error: 'データを取得できませんでした。時間をおいて再度お試しください。' }, 500);
+    }
+  },
 };
-
-const page = `<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fitness Dashboard</title><script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"><\/script><style>body{font-family:system-ui;margin:0;background:#101216;color:#f4f6fa}main{max-width:1000px;margin:auto;padding:22px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}.card,canvas{background:#191c23;border-radius:16px;padding:14px}.big{font-size:26px;font-weight:700}.muted{color:#9ca6b4}.chart{height:290px;margin:18px 0}</style></head><body><main><h1>Fitness Dashboard</h1><p class="muted">食事・PFC・塩分・筋トレ</p><div id="summary" class="grid"></div><div class="chart"><canvas id="cal"></canvas></div><div class="chart"><canvas id="pfc"></canvas></div><div class="chart"><canvas id="salt"></canvas></div><div class="chart"><canvas id="workout"></canvas></div><div class="chart"><canvas id="meal"></canvas></div><script>
-(async()=>{const d=await fetch('/api/daily').then(r=>r.json()),m=await fetch('/api/meals').then(r=>r.json()),x=d.at(-1)||{};summary.innerHTML=[['今日 kcal',(x.calories||0)+' / 2400'],['PFC Score',(x.pfc_score||0)+' / 100'],['P',(x.protein||0)+'g'],['F',(x.fat||0)+'g'],['C',(x.carbs||0)+'g'],['塩分',x.salt_g==null?'—':x.salt_g+'g']].map(v=>'<div class="card"><div class="muted">'+v[0]+'</div><div class="big">'+v[1]+'</div></div>').join('');const o={responsive:true,maintainAspectRatio:false};new Chart(cal,{type:'line',data:{labels:d.map(v=>v.date),datasets:[{label:'kcal',data:d.map(v=>v.calories)}]},options:o});new Chart(pfc,{type:'line',data:{labels:d.map(v=>v.date),datasets:[{label:'P',data:d.map(v=>v.protein)},{label:'F',data:d.map(v=>v.fat)},{label:'C',data:d.map(v=>v.carbs)}]},options:o});new Chart(salt,{type:'line',data:{labels:d.map(v=>v.date),datasets:[{label:'塩分 g',data:d.map(v=>v.salt_g)}]},options:o});new Chart(workout,{type:'bar',data:{labels:d.map(v=>v.date),datasets:[{label:'筋トレ総ボリューム kg',data:d.map(v=>v.workout_volume)}]},options:o});const dates=[...new Set(m.map(v=>v.date))],groups=['朝食','昼食','夕食','間食・飲み物'];new Chart(meal,{type:'bar',data:{labels:dates,datasets:groups.map(g=>({label:g,data:dates.map(dt=>m.find(v=>v.date===dt&&v.meal_group===g)?.calories||0),stack:'x'}))},options:{...o,scales:{x:{stacked:true},y:{stacked:true}}}})})()
-<\/script></main></body></html>`;
