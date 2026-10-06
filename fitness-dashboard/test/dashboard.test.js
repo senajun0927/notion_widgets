@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import worker, { period } from '../src/index.js';
 
-const migration = readFileSync(new URL('../migrations/0001_workout_sets.sql', import.meta.url), 'utf8');
+const migration = readFileSync(new URL('../migrations/0001_workout_sets.sql', import.meta.url), 'utf8') + readFileSync(new URL('../migrations/0002_notion_sync.sql', import.meta.url), 'utf8');
 const schema = 'CREATE TABLE daily (date TEXT PRIMARY KEY, calories REAL, protein REAL, fat REAL, carbs REAL, salt_g REAL, pfc_score REAL, weight_kg REAL, workout_volume REAL, training INTEGER DEFAULT 0, notes TEXT); CREATE TABLE meals (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, meal_group TEXT NOT NULL, name TEXT, calories REAL, protein REAL, fat REAL, carbs REAL, salt_g REAL);';
 
 function setup() {

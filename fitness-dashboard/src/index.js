@@ -1,4 +1,5 @@
 import { page } from './page.js';
+import { syncNotion } from './notion-sync.js';
 
 export const TARGETS = Object.freeze({
   calories: [2300, 2500], protein: [120, 140], fat: [55, 70], carbs: [290, 340],
@@ -21,16 +22,19 @@ function filtered(db, sql, p) {
   return p.start ? stmt.bind(p.start, p.end) : stmt;
 }
 
-const DAILY = 'SELECT * FROM daily /*period*/ ORDER BY date';
-const MEALS = 'SELECT date, meal_group, SUM(calories) calories FROM meals /*period*/ GROUP BY date, meal_group ORDER BY date, meal_group';
-const VOLUMES = 'SELECT date, SUM(weight_kg * reps) volume FROM workout_sets /*period*/ GROUP BY date ORDER BY date';
-const EXERCISES = 'SELECT exercise, COUNT(*) sets, MAX(date) last_date FROM workout_sets GROUP BY exercise ORDER BY exercise';
+const DAILY = 'SELECT * FROM dashboard_daily /*period*/ ORDER BY date';
+const MEALS = 'SELECT date, meal_group, SUM(calories) calories FROM dashboard_meals /*period*/ GROUP BY date, meal_group ORDER BY date, meal_group';
+const VOLUMES = `SELECT w.date, COALESCE((SELECT SUM(json_extract(n.payload,'$.volume')) FROM notion_records n WHERE n.kind='training' AND n.date=w.date),SUM(w.weight_kg*w.reps)) volume FROM dashboard_workout_sets w /*period*/ GROUP BY w.date ORDER BY w.date`;
+const EXERCISES = 'SELECT exercise, COUNT(*) sets, MAX(date) last_date FROM dashboard_workout_sets GROUP BY exercise ORDER BY exercise';
 
 function json(value, status = 200) {
   return Response.json(value, { status, headers: { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
 }
 
 export default {
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(syncNotion(env));
+  },
   async fetch(request, env) {
     const url = new URL(request.url);
     if (!['GET', 'HEAD'].includes(request.method)) {
@@ -44,10 +48,14 @@ export default {
       } });
     }
     if (url.pathname === '/favicon.ico') return new Response(null, { status: 204 });
-    if (!['/api/daily', '/api/meals', '/api/dashboard', '/api/exercises', '/api/exercise'].includes(url.pathname)) {
+    if (!['/api/daily', '/api/meals', '/api/dashboard', '/api/exercises', '/api/exercise', '/api/sync/status'].includes(url.pathname)) {
       return json({ error: 'Not found' }, 404);
     }
     try {
+      if (url.pathname === '/api/sync/status') {
+        const state = await env.DB.prepare('SELECT status,last_attempt,last_success,error_code,record_count FROM notion_sync_state WHERE id=1').first();
+        return json({ ...state, configured: Boolean(env.NOTION_TOKEN), interval_minutes: 5 });
+      }
       const p = period(url.searchParams);
       let data;
       switch (url.pathname) {
@@ -65,7 +73,7 @@ export default {
           if (!name || name.length > 200) return json({ error: 'name に種目名を指定してください（200文字以内）。' }, 400);
           const dateFilter = p.start ? ' AND date >= ? AND date <= ?' : '';
           // One row is one set: daily max weight, total repetitions and volume.
-          const sql = 'SELECT date, MAX(weight_kg) weight_kg, SUM(reps) reps, SUM(weight_kg * reps) volume, COUNT(*) sets FROM workout_sets WHERE exercise = ?' + dateFilter + ' GROUP BY date ORDER BY date';
+          const sql = `SELECT w.date, MAX(w.weight_kg) weight_kg, SUM(w.reps) reps, COALESCE((SELECT SUM(json_extract(n.payload,'$.volume')) FROM notion_records n WHERE n.kind='training' AND n.date=w.date AND json_extract(n.payload,'$.exercise')=w.exercise), SUM(w.weight_kg*w.reps)) volume, COUNT(*) sets FROM dashboard_workout_sets w WHERE exercise = ?` + dateFilter + ' GROUP BY w.date ORDER BY w.date';
           const rows = await env.DB.prepare(sql).bind(name, ...(p.start ? [p.start, p.end] : [])).all();
           data = { period: p, exercise: name, days: rows.results };
           break;

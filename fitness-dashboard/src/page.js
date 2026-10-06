@@ -18,7 +18,7 @@ export const page = `<!doctype html>
   <a href="#nutrition" class="skip">グラフへ移動</a>
   <main>
     <header class="intro"><div><p class="eyebrow">DAILY HEALTH LOG</p><h1>Fitness Dashboard</h1><p class="muted">食べる、動く。日々の積み重ねを見える形に。</p></div><div class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg></div></header>
-    <nav class="toolbar" aria-label="表示期間"><div class="controls"><div class="ranges"><button data-range="7" aria-pressed="true">7日</button><button data-range="30" aria-pressed="false">30日</button><button data-range="all" aria-pressed="false">全期間</button></div><button id="refresh" class="refresh" aria-label="データを再取得">更新</button></div><div class="range-meta"><span id="period-label">期間を読み込み中</span><span id="record-count"></span><span>日本時間</span></div></nav>
+    <nav class="toolbar" aria-label="表示期間"><div class="controls"><div class="ranges"><button data-range="7" aria-pressed="true">7日</button><button data-range="30" aria-pressed="false">30日</button><button data-range="all" aria-pressed="false">全期間</button></div><button id="refresh" class="refresh" aria-label="データを再取得">更新</button></div><div class="range-meta"><span id="period-label">期間を読み込み中</span><span id="record-count"></span><span>日本時間</span><span id="sync-label" role="status">Notion 同期状態を確認中</span></div></nav>
     <div id="status" class="status" role="status" aria-live="polite">データを読み込んでいます…</div>
     <div id="dashboard" hidden>
       <div id="summary" class="summary" aria-label="記録のサマリー"></div>

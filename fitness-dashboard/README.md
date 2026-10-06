@@ -12,8 +12,8 @@ Cloudflare Workers + D1 の個人用ダッシュボード。
 - PFC Score: `daily.pfc_score` の保存済みスコアを表示。再計算や書き換えはしない。縦軸0–100点。
 - 塩分、朝食・昼食・夕食・間食のカロリー、体重、筋トレ総ボリューム。
 - 間食と飲み物はまとめて表示。未記録の食事は0扱いにしない。
-- 総ボリュームは既存の `daily.workout_volume` を優先する。NULLまたは日別行のない日だけ `workout_sets` を集計し、二重加算を防ぐ。
-- 種目別は1行1セット。日ごとの最大重量、全セットの合計回数、`SUM(weight_kg * reps)` を表示。重量は記録時の総負荷kg。
+- 総ボリュームは同期済み Training Log を優先する。未同期の日付は既存の `daily.workout_volume`、NULLの場合は `workout_sets` の集計値を使い、二重加算を防ぐ。
+- 種目別は日ごとの最大重量、全セットの合計回数、Notionの保存済み総ボリュームを表示。未保存の場合は `SUM(weight_kg * reps)`。重量は記録時の総負荷kg。
 - 未記録は「—」とグラフの空白。保存済みの0は0として表示。
 - `daily.notes` に `partial` / `途中` / `未完` がある日は、入力途中であることを明示。
 - タップ・マウス・左右キーで日別の値を確認でき、各グラフの下には日別表もある。
@@ -49,7 +49,7 @@ npm run deploy
 
 Cloudflareのトークン等は環境変数、Wranglerログイン、Worker Secretsで管理する。`.env` / `.dev.vars` / バックアップ / `.wrangler` はコミットしない。
 
-データ入力は既存の運用を継続する。新しいインポーターで種目の記録を取り込む場合は `workout_sets(date, exercise, weight_kg, reps, notes)` に1セットずつ保存する。体重は既存の `daily.weight_kg` に保存する。日別総ボリュームを保存する運用では、同日の `daily.workout_volume` も整合させる。
+データ入力は Notion に一本化し、下記の自動同期を利用する。
 
 ## 検証
 
@@ -61,3 +61,23 @@ npm run check:build
 ```
 
 テストでは実際のSQLiteクエリを実行し、期間境界、日本時間、集計、NULL/0、不正パラメータ、migrationの再適用・既存行保持を確認する。`check:build` はビルド済みWorkerが返すHTMLのスクリプトを実行し、ブラウザー用スクリプトにWorker用の補助関数が混入していないことを確認する。テスト用の体重・セット記録を本番へ挿入しない。
+
+## Notion → D1 自動同期
+
+入力は Notion のみ。Cron `*/5 * * * *` で既存の Food Log / Training Log / Daily Fitness Summary を読む。読み取り専用 integration を作成し Fitness ページ配下の3データベースへアクセスを付与し、Worker の Secret `NOTION_TOKEN` にトークンを登録する。ChatGPT の Notion 接続とは別の Worker 用接続が必要。
+
+```sh
+npx wrangler secret put NOTION_TOKEN
+```
+
+トークンはチャット・コード・Gitに保存しない。Secret設定後は次の定期実行で初回同期する（Cron反映は最大15分）。D1への手入力は不要。画面上部と `/api/sync/status` に同期状態・成功日時を表示する。更新ボタンは表示を再取得する。
+
+`0002_notion_sync.sql` は元テーブルを変更せず、ミラー・同期状態・表示用viewを追加する。NotionページIDをキーに、3ソースの全ページ取得・検証成功後にD1トランザクションでスナップショットを置換。訂正・削除・アーカイブを反映し、取得失敗時は前回成功データを保持する。期限付きロックで重複実行を防ぐ。Notionに一度取り込まれた日付は所有履歴を保存し、削除後に古いD1コピーが復活しない。元の `daily` / `meals` / `workout_sets` は残し、Notionにない既存日付は表示を継続する。
+
+- カロリー・PFCは Food Log を日別集計し、サマリー更新を待たず反映。塩分は全食事の値がそろう日のみ日計を表示し、一部不明ならNULL。
+- 体重・PFC Scoreは Daily Fitness Summary の保存値。スコアは再計算しない。未作成サマリーの値は未記録。
+- Training Log はSet列と、明示的な `4セット目: 60kg×13` 形式のNotesを読む。追加セットごとに同形式が必要。未記録セットは推測せず同期エラーにする。
+- 重量は日別最大、回数は全セット合計。ボリュームは Notion の `Total Volume kg` を優先し、未記録時のみセットから計算。差はミラーの `volume_mismatch` に保持し、元Notionは変更しない。
+- 各ソース2,000件、取得4分の保護上限。上限・権限不足・プロパティの名前/型変更・同日日次サマリー重複等は同期エラーになる。API 429/5xxは再試行する。
+
+旧Workerを再デプロイすれば元テーブル表示へ戻せる。追加テーブルの削除は不要。

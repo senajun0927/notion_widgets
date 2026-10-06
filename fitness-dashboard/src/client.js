@@ -210,6 +210,11 @@ export const clientScript = String.raw`(function mountDashboard() {
       $('dashboard').hidden = false; $('exercise-charts').hidden = false;
       render();
       $('status').hidden = true;
+      getJSON('/api/sync/status', controller.signal).then(sync => {
+        if (id !== requestId) return;
+        const stamp = sync.last_success ? new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(sync.last_success)) : null;
+        $('sync-label').textContent = !sync.configured ? 'Notion 自動同期：接続設定待ち' : sync.status === 'error' ? 'Notion 同期失敗・前回のデータを表示' : stamp ? 'Notion 同期 ' + stamp + '（5分ごと）' : 'Notion 初回同期待ち';
+      }).catch(() => { if (id === requestId) $('sync-label').textContent = 'Notion 同期状態を取得できません'; });
       const url = new URL(location.href); url.searchParams.set('range', range); history.replaceState(null, '', url);
     } catch (error) {
       if (error.name !== 'AbortError' && id === requestId) { $('status').className = 'status error'; $('status').textContent = error.message; }
