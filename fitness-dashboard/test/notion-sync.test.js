@@ -40,7 +40,7 @@ test('idempotent snapshot preserves originals and handles edit/archive without d
 });
 test('pagination completes before publish and API failure retains last successful data',async()=>{
  const {sqlite,DB}=setup();let calls=0;
- const fetcher=async(url,o)=>{assert.equal(o.headers.Authorization,'Bearer test-secret');assert.equal(o.headers['Notion-Version'],'2025-09-03');calls++;
+ const fetcher=async(url,o)=>{assert.equal(o.redirect,'manual');assert.equal(o.headers.Authorization,'Bearer test-secret');assert.equal(o.headers['Notion-Version'],'2025-09-03');calls++;
  const k=Object.keys(SOURCES).find(k=>url.includes(SOURCES[k]));const cursor=JSON.parse(o.body).start_cursor;
  if(k==='meal'&&!cursor)return Response.json({results:[page(k)],has_more:true,next_cursor:'next'});
  return Response.json({results:k==='meal'?[]:[page(k,(k==='daily'?'c':'b').repeat(32))],has_more:false});};

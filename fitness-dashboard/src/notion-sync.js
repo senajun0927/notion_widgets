@@ -73,7 +73,7 @@ async function querySource(id, token, fetcher, deadline) {
     for (let attempt=0; attempt<3; attempt++) {
       response = await fetcher(`https://api.notion.com/v1/data_sources/${id}/query`, {
         method:'POST', headers:{Authorization:`Bearer ${token}`,'Notion-Version':'2025-09-03','Content-Type':'application/json'},
-        body:JSON.stringify({page_size:100,...(cursor ? {start_cursor:cursor} : {})}), signal:AbortSignal.timeout(20000), redirect:'error',
+        body:JSON.stringify({page_size:100,...(cursor ? {start_cursor:cursor} : {})}), signal:AbortSignal.timeout(20000), redirect:'manual',
       });
       if (response.ok) break;
       if ((response.status !== 429 && response.status < 500) || attempt === 2) throw new SyncError(`notion_http_${response.status}`);
@@ -129,7 +129,7 @@ export async function syncNotion(env, fetcher = fetch) {
     // Never log Notion response bodies, credentials or private page content.
     const code = error instanceof SyncError ? error.code : 'sync_failed';
     await DB.prepare("UPDATE notion_sync_state SET status='error',error_code=? WHERE id=1 AND lock_owner=?").bind(code,owner).run();
-    console.error(JSON.stringify({event:'notion_sync_failed',code}));
+    console.error(JSON.stringify({event:'notion_sync_failed',code,error_type:error.name,frames:String(error.stack || '').split('\n').filter(line => /^\s+at .+index\.js:\d+:\d+/.test(line)).slice(0,6)}));
     throw new SyncError(code);
   } finally {
     await DB.prepare('UPDATE notion_sync_state SET lock_owner=NULL,lock_until=0 WHERE id=1 AND lock_owner=?').bind(owner).run();
