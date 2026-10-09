@@ -53,11 +53,24 @@ export function normalize(kind, page) {
       if (weight_kg === null || !Number.isInteger(reps) || reps <= 0) throw new SyncError('incomplete_sets');
       sets.push({weight_kg,reps});
     }
-    // Only explicitly numbered extra sets; never invent sets from a total volume.
+    // A complete list is bounded by sentence/newline so a repeated top set
+    // or a recommendation later in Notes is never counted as another set.
+    const list = notes.match(/全セット\s*[:：]\s*([^。\n]+)/)?.[1];
+    let listed;
+    if (list !== undefined) {
+      const parts = list.trim().split(/[、,，/／]/).map(v => v.trim());
+      listed = parts.map(part => {
+        const m = part.match(/^(\d+(?:\.\d+)?)\s*kg\s*[×xｘ]\s*(\d+)\s*(?:回)?$/i);
+        if (!m || Number(m[2]) < 1) throw new SyncError('incomplete_sets');
+        return {weight_kg:Number(m[1]),reps:Number(m[2])};
+      });
+      if (listed.length !== count || sets.some((v,i)=>v.weight_kg !== listed[i].weight_kg || v.reps !== listed[i].reps)) throw new SyncError('conflicting_sets');
+    }
     for (let i = 4; i <= count; i++) {
       const match = notes.match(new RegExp(`${i}セット目\\s*[:：]\\s*(\\d+(?:\\.\\d+)?)\\s*kg\\s*[×xｘ]\\s*(\\d+)`, 'i'));
-      if (!match || Number(match[2]) < 1) throw new SyncError('incomplete_sets');
-      sets.push({weight_kg:Number(match[1]),reps:Number(match[2])});
+      const extra = listed?.[i-1] ?? (match ? {weight_kg:Number(match[1]),reps:Number(match[2])} : null);
+      if (!extra || extra.reps < 1) throw new SyncError('incomplete_sets');
+      sets.push(extra);
     }
     const actual = sets.reduce((s,v)=>s+v.weight_kg*v.reps,0);
     const stored = number(p,'Total Volume kg');
@@ -90,7 +103,7 @@ async function querySource(id, token, fetcher, deadline) {
   } while(cursor);
   return rows;
 }
-export async function applySnapshot(DB, rows, owner = null) {
+export async function applySnapshot(DB, rows, owner = null, kinds = Object.keys(SOURCES), failures = []) {
   const dailyDates = new Set(), keys = new Set();
   for (const r of rows) {
     const key = r.kind+':'+r.page_id;
@@ -101,10 +114,10 @@ export async function applySnapshot(DB, rows, owner = null) {
   // Ownership is checked inside the same transaction, preventing an expired run publishing.
   const guard = owner ? ' AND EXISTS(SELECT 1 FROM notion_sync_state WHERE lock_owner=? AND lock_until>?)' : '';
   const args = owner ? [owner,Date.now()] : [];
-  const statements = [DB.prepare('DELETE FROM notion_records WHERE 1=1'+guard).bind(...args)];
+  const statements = [DB.prepare('DELETE FROM notion_records WHERE kind IN (SELECT value FROM json_each(?))'+guard).bind(JSON.stringify(kinds),...args)];
   statements.push(DB.prepare("INSERT INTO notion_records(kind,page_id,date,payload) SELECT json_extract(value,'$.kind'),json_extract(value,'$.page_id'),json_extract(value,'$.date'),json_extract(value,'$.payload') FROM json_each(?) WHERE 1=1"+guard).bind(JSON.stringify(rows),...args));
   statements.push(DB.prepare('INSERT OR IGNORE INTO notion_owned_dates(kind,date) SELECT kind,date FROM notion_records WHERE 1=1'+guard).bind(...args));
-  statements.push(DB.prepare("UPDATE notion_sync_state SET status='ok',last_success=?,record_count=?,error_code=NULL WHERE id=1"+(owner ? ' AND lock_owner=? AND lock_until>?' : '')).bind(new Date().toISOString(),rows.length,...args));
+  statements.push(DB.prepare("UPDATE notion_sync_state SET status=?,last_success=?,record_count=(SELECT COUNT(*) FROM notion_records),error_code=? WHERE id=1"+(owner ? ' AND lock_owner=? AND lock_until>?' : '')).bind(failures.length ? 'partial' : 'ok',new Date().toISOString(),failures.length ? failures.map(f=>f.kind+':'+f.code).join(',') : null,...args));
   await DB.batch(statements);
 }
 export async function syncNotion(env, fetcher = fetch) {
@@ -117,14 +130,21 @@ export async function syncNotion(env, fetcher = fetch) {
   const lease = await DB.prepare("UPDATE notion_sync_state SET lock_owner=?,lock_until=?,last_attempt=?,status='running',error_code=NULL WHERE id=1 AND lock_until<=?").bind(owner,now+600000,new Date(now).toISOString(),now).run();
   if (!lease.meta.changes) return {status:'busy'};
   try {
-    const rows=[];
+    const rows=[], kinds=[], failures=[];
     for(const [kind,id] of Object.entries(SOURCES)) {
-      const pages = await querySource(id,env.NOTION_TOKEN,fetcher,now+240000);
-      rows.push(...pages.map(p=>normalize(kind,p)));
+      try {
+        const pages = await querySource(id,env.NOTION_TOKEN,fetcher,now+240000);
+        const normalized = pages.map(p=>normalize(kind,p));
+        if(kind === 'daily' && new Set(normalized.map(r=>r.date)).size !== normalized.length) throw new SyncError('duplicate_source_record');
+        rows.push(...normalized); kinds.push(kind);
+      } catch(error) {
+        failures.push({kind,code:error instanceof SyncError ? error.code : 'sync_failed'});
+      }
     }
+    if(!kinds.length) throw new SyncError(failures[0].code);
     if(Date.now()>now+240000) throw new SyncError('sync_limit');
-    await applySnapshot(DB,rows,owner);
-    return {status:'ok',records:rows.length};
+    await applySnapshot(DB,rows,owner,kinds,failures);
+    return {status:failures.length ? 'partial' : 'ok',records:rows.length,failed_sources:failures};
   } catch(error) {
     // Never log Notion response bodies, credentials or private page content.
     const code = error instanceof SyncError ? error.code : 'sync_failed';

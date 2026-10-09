@@ -7,7 +7,7 @@ function setup() {
  const sqlite=new DatabaseSync(':memory:');
  sqlite.exec('CREATE TABLE daily(date TEXT PRIMARY KEY,calories REAL,protein REAL,fat REAL,carbs REAL,salt_g REAL,pfc_score REAL,weight_kg REAL,workout_volume REAL,training INTEGER,notes TEXT);CREATE TABLE meals(id INTEGER PRIMARY KEY,date TEXT,meal_group TEXT,name TEXT,calories REAL,protein REAL,fat REAL,carbs REAL,salt_g REAL);');
  for(const f of ['0001_workout_sets.sql','0002_notion_sync.sql'])sqlite.exec(readFileSync(new URL('../migrations/'+f,import.meta.url),'utf8'));
- const DB={prepare(sql){let params=[];const q={bind(...v){params=v;return q;},async run(){return {meta:{changes:sqlite.prepare(sql).run(...params).changes}};}};return q;},async batch(qs){sqlite.exec('BEGIN');try{const results=[];for(const q of qs)results.push(await q.run());sqlite.exec('COMMIT');return results;}catch(e){sqlite.exec('ROLLBACK');throw e;}}};
+ const DB={prepare(sql){let params=[];const q={bind(...v){params=v;return q;},async all(){return {results:sqlite.prepare(sql).all(...params)};},async run(){return {meta:{changes:sqlite.prepare(sql).run(...params).changes}};}};return q;},async batch(qs){sqlite.exec('BEGIN');try{const results=[];for(const q of qs)results.push(await q.run());sqlite.exec('COMMIT');return results;}catch(e){sqlite.exec('ROLLBACK');throw e;}}};
  return {sqlite,DB};
 }
 const prop=(type,v)=>({type,[type]:v});
@@ -53,4 +53,28 @@ test('missing secret and overlapping runs do not fetch; expired lock cannot publ
  const {sqlite,DB}=setup();const fail=()=>{throw Error('unexpected fetch');};assert.equal((await syncNotion({DB},fail)).status,'not_configured');
  sqlite.prepare('UPDATE notion_sync_state SET lock_until=?,lock_owner=?').run(Date.now()+600000,'other');assert.equal((await syncNotion({DB,NOTION_TOKEN:'test'},fail)).status,'busy');
  await applySnapshot(DB,[normalize('meal',page('meal'))],'expired');assert.equal(sqlite.prepare('SELECT COUNT(*) n FROM notion_records').get().n,0);sqlite.close();
+});
+test('full-set list reads fourth/fifth sets once and rejects conflicts',()=>{
+ const p=page('training');p.properties.Sets=prop('number',5);p.properties['Set 3 reps']=prop('number',8);
+ p.properties['Total Volume kg']=prop('number',1620);
+ p.properties.Notes=prop('rich_text',[{plain_text:'全セット: 20kg×10、40kg×10、50kg×8、50kg×6、40kg×8。トップセット50kg×8。'}]);
+ const r=normalize('training',p);assert.equal(r.payload.sets.length,5);assert.equal(r.payload.calculated_volume,1620);
+ assert.equal(r.payload.sets.reduce((n,v)=>n+v.reps,0),42);
+ p.properties.Sets=prop('number',4);assert.throws(()=>normalize('training',p),/conflicting_sets/);
+ p.properties.Sets=prop('number',5);p.properties['Set 1 kg']=prop('number',30);assert.throws(()=>normalize('training',p),/conflicting_sets/);
+});
+test('bad training details retain training snapshot while weight and score update',async()=>{
+ const {sqlite,DB}=setup();await applySnapshot(DB,[normalize('training',page('training','b'.repeat(32)))]);
+ const trainingBefore=sqlite.prepare("SELECT * FROM notion_records WHERE kind='training'").all();
+ const fetcher=async(url)=>{const kind=Object.keys(SOURCES).find(k=>url.includes(SOURCES[k]));const p=page(kind,kind==='daily'?'c'.repeat(32):kind==='training'?'b'.repeat(32):'a'.repeat(32));
+ if(kind==='training')p.properties.Notes=prop('rich_text',[]);
+ if(kind==='daily'){p.properties['Weight kg']=prop('number',68);p.properties['PFC Score']=prop('number',73);}
+ return Response.json({results:[p],has_more:false});};
+ const result=await syncNotion({DB,NOTION_TOKEN:'test'},fetcher);assert.equal(result.status,'partial');assert.deepEqual(result.failed_sources,[{kind:'training',code:'incomplete_sets'}]);
+ const daily=sqlite.prepare('SELECT * FROM dashboard_daily').get();assert.equal(daily.weight_kg,68);assert.equal(daily.pfc_score,73);
+ assert.deepEqual(sqlite.prepare("SELECT * FROM notion_records WHERE kind='training'").all(),trainingBefore);
+ const state=sqlite.prepare('SELECT * FROM notion_sync_state').get();assert.equal(state.status,'partial');assert.equal(state.record_count,3);assert.equal(state.error_code,'training:incomplete_sets');
+ // A subsequently fixed source clears the warning and publishes complete data.
+ await syncNotion({DB,NOTION_TOKEN:'test'},async(url)=>{const k=Object.keys(SOURCES).find(k=>url.includes(SOURCES[k]));return Response.json({results:[page(k)],has_more:false});});
+ assert.equal(sqlite.prepare('SELECT status FROM notion_sync_state').get().status,'ok');sqlite.close();
 });
