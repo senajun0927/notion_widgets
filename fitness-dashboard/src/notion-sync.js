@@ -114,11 +114,13 @@ export async function applySnapshot(DB, rows, owner = null, kinds = Object.keys(
   // Ownership is checked inside the same transaction, preventing an expired run publishing.
   const guard = owner ? ' AND EXISTS(SELECT 1 FROM notion_sync_state WHERE lock_owner=? AND lock_until>?)' : '';
   const args = owner ? [owner,Date.now()] : [];
-  const statements = [DB.prepare('DELETE FROM notion_records WHERE kind IN (SELECT value FROM json_each(?))'+guard).bind(JSON.stringify(kinds),...args)];
-  statements.push(DB.prepare("INSERT INTO notion_records(kind,page_id,date,payload) SELECT json_extract(value,'$.kind'),json_extract(value,'$.page_id'),json_extract(value,'$.date'),json_extract(value,'$.payload') FROM json_each(?) WHERE 1=1"+guard).bind(JSON.stringify(rows),...args));
-  statements.push(DB.prepare('INSERT OR IGNORE INTO notion_owned_dates(kind,date) SELECT kind,date FROM notion_records WHERE 1=1'+guard).bind(...args));
+  const snapshot = JSON.stringify(rows);
+  const statements = [DB.prepare("DELETE FROM notion_records WHERE kind IN (SELECT value FROM json_each(?)) AND NOT EXISTS(SELECT 1 FROM json_each(?) incoming WHERE json_extract(incoming.value,'$.kind')=notion_records.kind AND json_extract(incoming.value,'$.page_id')=notion_records.page_id)"+guard).bind(JSON.stringify(kinds),snapshot,...args)];
+  statements.push(DB.prepare("INSERT INTO notion_records(kind,page_id,date,payload) SELECT json_extract(value,'$.kind'),json_extract(value,'$.page_id'),json_extract(value,'$.date'),json_extract(value,'$.payload') FROM json_each(?) WHERE 1=1"+guard+" ON CONFLICT(kind,page_id) DO UPDATE SET date=excluded.date,payload=excluded.payload WHERE notion_records.date IS NOT excluded.date OR notion_records.payload IS NOT excluded.payload").bind(snapshot,...args));
+  statements.push(DB.prepare('INSERT OR IGNORE INTO notion_owned_dates(kind,date) SELECT kind,date FROM notion_records WHERE NOT EXISTS(SELECT 1 FROM notion_owned_dates owned WHERE owned.kind=notion_records.kind AND owned.date=notion_records.date)'+guard).bind(...args));
   statements.push(DB.prepare("UPDATE notion_sync_state SET status=?,last_success=?,record_count=(SELECT COUNT(*) FROM notion_records),error_code=? WHERE id=1"+(owner ? ' AND lock_owner=? AND lock_until>?' : '')).bind(failures.length ? 'partial' : 'ok',new Date().toISOString(),failures.length ? failures.map(f=>f.kind+':'+f.code).join(',') : null,...args));
-  await DB.batch(statements);
+  const result = await DB.batch(statements);
+  return { deleted: result[0].meta.changes, upserted: result[1].meta.changes };
 }
 export async function syncNotion(env, fetcher = fetch) {
   const DB = env.DB;
@@ -143,8 +145,8 @@ export async function syncNotion(env, fetcher = fetch) {
     }
     if(!kinds.length) throw new SyncError(failures[0].code);
     if(Date.now()>now+240000) throw new SyncError('sync_limit');
-    await applySnapshot(DB,rows,owner,kinds,failures);
-    return {status:failures.length ? 'partial' : 'ok',records:rows.length,failed_sources:failures};
+    const changes = await applySnapshot(DB,rows,owner,kinds,failures);
+    return {status:failures.length ? 'partial' : 'ok',records:rows.length,changes,failed_sources:failures};
   } catch(error) {
     // Never log Notion response bodies, credentials or private page content.
     const code = error instanceof SyncError ? error.code : 'sync_failed';

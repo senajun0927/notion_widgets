@@ -33,7 +33,9 @@ function json(value, status = 200) {
 
 export default {
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(syncNotion(env));
+    ctx.waitUntil(syncNotion(env).then(result => {
+      console.log(JSON.stringify({event:'notion_sync_completed',...result}));
+    }));
   },
   async fetch(request, env) {
     const url = new URL(request.url);

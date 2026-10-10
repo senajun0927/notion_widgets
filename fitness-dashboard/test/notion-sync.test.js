@@ -78,3 +78,17 @@ test('bad training details retain training snapshot while weight and score updat
  await syncNotion({DB,NOTION_TOKEN:'test'},async(url)=>{const k=Object.keys(SOURCES).find(k=>url.includes(SOURCES[k]));return Response.json({results:[page(k)],has_more:false});});
  assert.equal(sqlite.prepare('SELECT status FROM notion_sync_state').get().status,'ok');sqlite.close();
 });
+test('delta writes only inserted, edited or deleted records; preserves unchanged row identity',async()=>{
+ const {sqlite,DB}=setup();
+ const m=normalize('meal',page('meal')),d=normalize('daily',page('daily','c'.repeat(32)));
+ sqlite.exec("CREATE TABLE audit(operation TEXT); CREATE TRIGGER mirror_insert AFTER INSERT ON notion_records BEGIN INSERT INTO audit VALUES('insert'); END; CREATE TRIGGER mirror_update AFTER UPDATE ON notion_records BEGIN INSERT INTO audit VALUES('update'); END; CREATE TRIGGER mirror_delete AFTER DELETE ON notion_records BEGIN INSERT INTO audit VALUES('delete'); END;");
+ assert.deepEqual(await applySnapshot(DB,[m,d]),{deleted:0,upserted:2});
+ const identities=sqlite.prepare('SELECT rowid,kind,page_id FROM notion_records ORDER BY kind').all();
+ sqlite.exec('DELETE FROM audit');assert.deepEqual(await applySnapshot(DB,[m,d]),{deleted:0,upserted:0});
+ assert.equal(sqlite.prepare('SELECT COUNT(*) n FROM audit').get().n,0);
+ assert.deepEqual(sqlite.prepare('SELECT rowid,kind,page_id FROM notion_records ORDER BY kind').all(),identities);
+ m.payload.calories=555;assert.deepEqual(await applySnapshot(DB,[m,d]),{deleted:0,upserted:1});assert.deepEqual(sqlite.prepare('SELECT operation FROM audit').all().map(r=>r.operation),['update']);
+ sqlite.exec('DELETE FROM audit');m.date='2026-10-07';assert.deepEqual(await applySnapshot(DB,[m,d]),{deleted:0,upserted:1});assert.equal(sqlite.prepare('SELECT COUNT(*) n FROM notion_owned_dates WHERE kind=\'meal\'').get().n,2);
+ sqlite.exec('DELETE FROM audit');assert.deepEqual(await applySnapshot(DB,[d]),{deleted:1,upserted:0});assert.deepEqual(sqlite.prepare('SELECT operation FROM audit').all().map(r=>r.operation),['delete']);
+ sqlite.close();
+});
