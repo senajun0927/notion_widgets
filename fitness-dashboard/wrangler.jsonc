@@ -2,10 +2,12 @@
   "name": "fitness-dashboard",
   "main": "src/index.js",
   "compatibility_date": "2026-10-06",
+  "triggers": { "crons": ["*/5 * * * *"] },
   "observability": { "enabled": true },
   "d1_databases": [{
     "binding": "DB",
     "database_name": "fitness-dashboard",
-    "database_id": "351e6fef-9315-4b32-8128-3adcac523a41"
+    "database_id": "351e6fef-9315-4b32-8128-3adcac523a41",
+    "migrations_dir": "migrations"
   }]
 }
